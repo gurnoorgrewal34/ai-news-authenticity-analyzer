@@ -1,0 +1,27 @@
+# =============================================================
+# .gitignore — Tell Git which files to IGNORE
+#
+# These files will NOT be uploaded to GitHub.
+# This keeps your secrets and local files safe.
+# =============================================================
+
+# Secret keys — NEVER share these
+.env
+
+# Python compiled files (auto-generated, not needed)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment folder
+venv/
+env/
+.venv/
+
+# IDE/Editor settings
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
