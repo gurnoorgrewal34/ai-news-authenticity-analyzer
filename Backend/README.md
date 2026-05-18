@@ -1,138 +1,187 @@
-# 🗞️ Module 1: News Fetching System
+# 🧠 AI News Authenticity & Mental Wellness Analyzer
 
-**Part of:** AI News Authenticity & Mental Wellness Analyzer  
-**Tech stack:** FastAPI · Python · NewsAPI · python-dotenv
+An AI-powered full-stack application that analyzes live news articles for emotional tone, fear intensity, clickbait behavior, and mental wellness impact using NLP and transformer models.
+
+The system helps users consume news more critically and mindfully by combining sentiment analysis, contextual understanding, and wellness-focused insights.
 
 ---
 
-## 📁 Folder Structure
+# 🚀 Project Overview
 
-```
-Backend/
+This project allows users to:
+
+* Search real-time news articles using keywords
+* Fetch live headlines from NewsAPI
+* Analyze emotional tone of articles
+* Detect fear-inducing or emotionally manipulative language
+* Measure mental wellness impact
+* Generate AI-powered summaries
+* Extract key points automatically
+* View historical context related to the topic
+* Store and display previous analyses using SQLite database
+
+---
+
+# 🎯 Main Objective
+
+The goal of this project is to reduce harmful news consumption patterns by helping users:
+
+* Identify emotionally charged content
+* Recognize fear-based framing
+* Understand historical background before reacting emotionally
+* Consume news more responsibly
+
+---
+
+# 🛠️ Tech Stack
+
+## Frontend
+
+* Python
+* Streamlit
+
+## Backend
+
+* FastAPI
+* SQLite
+* REST APIs
+
+## AI / NLP Models
+
+* HuggingFace Transformers
+* DistilBERT SST-2 → Sentiment Analysis
+* DistilBART CNN → Text Summarization
+
+## APIs
+
+* NewsAPI
+* Wikipedia API
+
+---
+
+# ✨ Key Features
+
+## 🔍 Live News Search
+
+Search real-time news articles using any keyword or topic.
+
+## 🎭 Sentiment Analysis
+
+Detects whether the article tone is:
+
+* Positive
+* Neutral
+* Negative
+
+with confidence scores.
+
+## 😨 Fear Score Detection
+
+Calculates fear intensity based on emotionally alarming keywords and framing patterns.
+
+## 🎣 Clickbait Detection
+
+Detects sensational or exaggerated headline patterns.
+
+## 🧘 Mental Wellness Analysis
+
+Provides wellness-aware insights about the emotional impact of consuming the article.
+
+## 📝 AI Summarization
+
+Generates concise summaries of lengthy news articles.
+
+## 🔑 Key Point Extraction
+
+Automatically extracts the most important points from articles.
+
+## 🌍 Historical Context
+
+Provides background information and timelines related to major topics using Wikipedia and news references.
+
+## 🗂️ Analysis History
+
+Stores previous analysis results in SQLite for future viewing.
+
+---
+
+# 🧠 AI Models Used
+
+| Model            | Purpose                  |
+| ---------------- | ------------------------ |
+| DistilBERT SST-2 | Sentiment Classification |
+| DistilBART CNN   | News Summarization       |
+
+---
+
+# 📊 Scoring System
+
+| Score Range | Risk Level  |
+| ----------- | ----------- |
+| 0.00 – 0.34 | 🟢 Low      |
+| 0.35 – 0.64 | 🟡 Moderate |
+| 0.65 – 1.00 | 🔴 High     |
+
+---
+
+# 🏗️ System Architecture
+
+User → Streamlit Frontend → FastAPI Backend → HuggingFace Models + NewsAPI + SQLite Database
+
+---
+
+# 📂 Project Structure
+
+```bash
+api-news-analyzer/
 │
-├── main.py                  ← App entry point — starts the server
+├── Backend/
+│   ├── app/
+│   │   ├── routers/
+│   │   ├── services/
+│   │   ├── schemas/
+│   │   ├── models.py
+│   │   ├── database.py
+│   │   └── main.py
+│   │
+│   └── requirements.txt
 │
-├── .env                     ← 🔐 Secret keys (NEVER upload to GitHub)
-├── .gitignore               ← Tells Git to ignore .env and other files
-├── requirements.txt         ← All Python packages to install
+├── Frontend/
+│   └── app.py
 │
-└── app/                     ← Main application package
-    ├── __init__.py          ← Marks 'app' as a Python package (leave empty)
-    ├── config.py            ← Central configuration & settings
-    │
-    └── routers/             ← Route handlers (one file per topic)
-        ├── __init__.py      ← Marks 'routers' as a Python package (leave empty)
-        └── news.py          ← Handles the GET /news route
-```
-
-**Why this structure?**
-- Each feature lives in its own file → easy to find and change
-- `routers/` keeps routes organized as the project grows
-- `config.py` is a single place for all settings
-- `.env` keeps secrets out of your code
-
----
-
-## 🚀 How to Run the Server
-
-### Step 1 — Navigate to the Backend folder
-
-```bash
-cd api-news-analyzer/Backend
-```
-
-### Step 2 — Create a virtual environment (recommended)
-
-```bash
-# Create it
-python -m venv venv
-
-# Activate it (Windows)
-venv\Scripts\activate
-
-# Activate it (Mac/Linux)
-source venv/bin/activate
-```
-
-> You'll see `(venv)` appear in your terminal — that's correct!
-
-### Step 3 — Install all dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Step 4 — Add your NewsAPI key
-
-1. Go to [https://newsapi.org/register](https://newsapi.org/register) → sign up for free
-2. Copy your API key
-3. Open the `.env` file and replace `YOUR_ACTUAL_KEY_HERE` with your key:
-
-```
-NEWSAPI_KEY=abc123youractualkey
-```
-
-### Step 5 — Start the server
-
-```bash
-uvicorn main:app --reload
-```
-
-- `main` → refers to `main.py`
-- `app` → refers to the `app = FastAPI()` object inside main.py
-- `--reload` → auto-restarts the server when you save changes
-
----
-
-## ✅ Test the API
-
-Once the server is running, open your browser:
-
-| URL | What it does |
-|-----|-------------|
-| `http://127.0.0.1:8000/` | Welcome message |
-| `http://127.0.0.1:8000/docs` | 🎯 Interactive API explorer (Swagger UI) |
-| `http://127.0.0.1:8000/news?keyword=AI` | Fetch news about AI |
-| `http://127.0.0.1:8000/news?keyword=Bitcoin` | Fetch news about Bitcoin |
-
-### Example Response
-
-```json
-{
-  "keyword": "AI",
-  "total_results": 6821,
-  "articles_shown": 10,
-  "articles": [
-    {
-      "title": "Google launches new AI model",
-      "description": "A breakthrough in artificial intelligence...",
-      "source": "TechCrunch",
-      "url": "https://techcrunch.com/...",
-      "published_at": "2026-05-11T08:00:00Z"
-    }
-  ]
-}
+├── requirements.txt
+└── README.md
 ```
 
 ---
 
-## 🔑 Environment Variables
+# 💡 Real-World Applications
 
-| Variable | Description | Where to get it |
-|----------|-------------|-----------------|
-| `NEWSAPI_KEY` | Your NewsAPI secret key | [newsapi.org/register](https://newsapi.org/register) |
+* Mental wellness platforms
+* News credibility tools
+* Media literacy education
+* Journalism research
+* AI-powered content moderation
+* Emotional impact monitoring systems
+
+---
+
+# 🔮 Future Improvements
+
+* Fake news detection using ML classifiers
+* User authentication system
+* Personalized wellness dashboard
+* News recommendation engine
+* Interactive analytics dashboard
+* Multi-language support
+* Cloud database integration
+* Advanced misinformation scoring
 
 ---
 
-## 🛑 Common Errors
+# 👨‍💻 Developed By
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `NEWSAPI_KEY is not set` | Missing key in `.env` | Add your key to `.env` |
-| `429 Too Many Requests` | Free plan limit hit | Wait or upgrade plan |
-| `ModuleNotFoundError` | Dependencies not installed | Run `pip install -r requirements.txt` |
-| `Connection refused` | Server not running | Run `uvicorn main:app --reload` |
-
----
+Gurnoor Kaur
+B.Tech Student | AI & Data Analytics Enthusiast
 
 
