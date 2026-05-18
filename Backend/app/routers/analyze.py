@@ -1,119 +1,80 @@
 # =============================================================
-# app/routers/analyze.py — Module 2: AI News Analysis Engine
+# app/routers/analyze.py — Module 2: AI News Analysis Engine (v2)
 #
-# This file handles the POST /analyze endpoint.
-# It takes a news title + description and returns:
-#   - Sentiment (positive/negative/neutral) via HuggingFace AI
-#   - Confidence score (how certain the model is)
-#   - Fear score (custom logic)
-#   - Clickbait score (custom keyword detection)
-#   - Mental wellness impact level + recommendation
-#
-# =============================================================
-# HOW HUGGINGFACE TRANSFORMERS PIPELINE WORKS:
-#
-#   A "pipeline" is a high-level wrapper that does three things:
-#     1. TOKENIZE  — converts text into numbers the model understands
-#     2. INFERENCE — runs the model to produce predictions
-#     3. DECODE    — converts the model's output back to human-readable labels
-#
-#   You don't need to know the math. You just call:
-#     pipeline("sentiment-analysis")("Your text here")
-#   And it returns: [{"label": "POSITIVE", "score": 0.92}]
-#
-# HOW NLP INFERENCE WORKS:
-#   - The model has already been TRAINED on millions of examples.
-#   - "Inference" just means: "run this trained model on new input."
-#   - No learning happens here — the model's weights are fixed.
-#   - It's like asking an expert to read a sentence (they already know the language).
-#
-# TRAINING vs INFERENCE:
-#   Training  = Teaching the model (takes days, costs $$$, done by HuggingFace)
-#   Inference = Using the trained model (takes milliseconds, done by us)
-#
-# WHY PRETRAINED MODELS ARE USEFUL:
-#   - Trained on billions of words from the internet
-#   - They already understand grammar, context, and emotion
-#   - We benefit from all that learning for FREE
-#   - We just download and use them — no GPU required for small models
-#
+# WHAT CHANGED IN v2:
+#   - Added compute_fake_news_risk()  → LOW / MEDIUM / HIGH
+#   - Added get_emotional_framing()   → Neutral / Fear-driven /
+#                                       Emotionally Charged / Sensationalized
+#   - Saves quick_summary + reading_time_label to SQLite
+#   - Returns new ai_flags section in response
+#   - All existing logic fully preserved
 # =============================================================
 
-import re                              # Built-in: regular expressions for text matching
-import logging                         # Built-in: for logging errors and info
+import re
+import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-# Our Pydantic schemas (request/response shapes)
 from app.schemas.analyze import AnalyzeRequest, AnalyzeResponse
+from app.database import get_db
+from app import crud
 
-# -----------------------------------------------
-# Set up a logger for this module
-# This prints structured messages to the console
-# -----------------------------------------------
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------
-# Create the router for all /analyze routes
-# -----------------------------------------------
 router = APIRouter(
-    prefix="/analyze",   # All routes here start with /analyze
-    tags=["Analysis"],   # Groups routes under "Analysis" in /docs
+    prefix="/analyze",
+    tags=["Analysis"],
 )
 
 
 # =============================================================
-# MODEL LOADING — Load the HuggingFace pipeline ONCE at startup
-#
-# WHY LOAD ONCE (not inside the function)?
-#   - Loading a model takes 2–5 seconds the first time
-#   - If we loaded it inside the function, every request would be slow
-#   - By loading at module import time, it loads ONCE when the server starts
-#   - All subsequent requests reuse the same loaded model (fast!)
-#
-# MODEL USED: distilbert-base-uncased-finetuned-sst-2-english
-#   - "distilbert" = smaller, faster version of BERT (by Google)
-#   - "uncased" = treats "Hello" and "hello" the same way
-#   - "finetuned-sst-2" = fine-tuned on SST-2 (Stanford Sentiment Treebank)
-#   - This model classifies text as POSITIVE or NEGATIVE
-#   - Size: ~268MB — downloads automatically on first use
+# MODEL LOADING — Load HuggingFace pipelines ONCE at startup
 # =============================================================
 
-# Lazy import: we import transformers here so the server still starts
-# even if there's an issue with the ML libraries
 try:
     from transformers import pipeline as hf_pipeline
 
-    # pipeline() downloads the model if not cached, then loads it into memory
-    # "sentiment-analysis" is the task type — HuggingFace knows which model to use
-    # model= specifies the exact pretrained model to use
     sentiment_pipeline = hf_pipeline(
         "sentiment-analysis",
         model="distilbert-base-uncased-finetuned-sst-2-english",
-        # truncation=True: if text is too long, it cuts it to the model's max length
-        # max_length=512: this model can process at most 512 tokens at a time
         truncation=True,
         max_length=512,
     )
     MODEL_LOADED = True
     MODEL_NAME   = "distilbert-base-uncased-finetuned-sst-2-english"
-    logger.info("✅ Sentiment analysis model loaded successfully.")
+    logger.info("✅ Sentiment model loaded.")
 
 except Exception as e:
-    # If the model fails to load, we set a flag and handle it gracefully
     sentiment_pipeline = None
     MODEL_LOADED       = False
     MODEL_NAME         = "unavailable"
-    logger.error(f"❌ Failed to load sentiment model: {e}")
+    logger.error(f"❌ Sentiment model failed: {e}")
+
+
+try:
+    from transformers import pipeline as hf_pipeline
+
+    summarizer_pipeline = hf_pipeline(
+        "summarization",
+        model="sshleifer/distilbart-cnn-12-6",
+        truncation=True,
+    )
+    SUMMARIZER_LOADED = True
+    SUMMARIZER_NAME   = "sshleifer/distilbart-cnn-12-6"
+    logger.info("✅ Summarization model loaded.")
+
+except Exception as e:
+    summarizer_pipeline = None
+    SUMMARIZER_LOADED   = False
+    SUMMARIZER_NAME     = "unavailable"
+    logger.warning(f"⚠️  Summarization model not loaded: {e}")
 
 
 # =============================================================
-# FEAR KEYWORDS — Words commonly associated with fear/anxiety in news
-#
-# This is a hand-crafted list we use to compute a "fear score".
-# In a real production system, you'd use a fine-tuned emotion model.
-# For now, this keyword-matching approach is transparent and explainable.
+# KEYWORD LISTS
 # =============================================================
+
 FEAR_KEYWORDS = [
     "crisis", "disaster", "attack", "war", "threat", "danger", "deadly",
     "collapse", "emergency", "catastrophe", "terror", "explosion", "shooting",
@@ -123,9 +84,14 @@ FEAR_KEYWORDS = [
     "bomb", "weapon", "hostage", "corruption", "fraud", "scandal", "arrested",
 ]
 
-# =============================================================
-# CLICKBAIT PATTERNS — Phrases that signal exaggerated headlines
-# =============================================================
+FINANCE_KEYWORDS = [
+    "stock", "stocks", "market", "markets", "gold", "silver", "finance",
+    "economy", "economic", "business", "oil", "exports", "trade",
+    "investment", "investments", "shares", "equity", "bonds", "gdp",
+    "inflation", "interest rate", "revenue", "profit", "fiscal", "monetary",
+    "commodity", "commodities", "exchange", "currency", "crypto", "bitcoin",
+]
+
 CLICKBAIT_PATTERNS = [
     r"\byou won't believe\b",
     r"\bshocking\b",
@@ -142,139 +108,121 @@ CLICKBAIT_PATTERNS = [
     r"\bviral\b",
     r"\binstantly\b",
     r"\bwow\b",
-    r"\b\d+ (ways|things|reasons|facts|tips)\b",  # e.g. "7 reasons why"
+    r"\b\d+ (ways|things|reasons|facts|tips)\b",
+]
+
+# Sensational words used in fake-news risk detection
+SENSATIONAL_WORDS = [
+    "exposed", "explosive", "bombshell", "coverup", "cover-up", "conspiracy",
+    "hoax", "fake", "lie", "lies", "lied", "corrupt", "corruption",
+    "rigged", "stolen", "manipulation", "manipulated", "propaganda",
+    "crisis actor", "false flag", "deep state", "plandemic", "scam",
+    "they don't want", "wake up", "sheeple", "censored", "banned",
+    "silenced", "truth", "real truth", "what they hide",
 ]
 
 
 # =============================================================
-# HELPER FUNCTION: Compute Fear Score
-#
-# Counts how many fear keywords appear in the text,
-# then normalizes to a 0.0–1.0 scale.
+# HELPER: Fear Score
 # =============================================================
+
 def compute_fear_score(text: str) -> float:
-    """
-    Returns a fear score between 0.0 (no fear) and 1.0 (very fear-inducing).
-
-    Method: count how many fear keywords appear in the lowercased text,
-    cap at a maximum, and normalize.
-    """
-    text_lower = text.lower()  # Normalize to lowercase for matching
-
-    # Count how many fear keywords appear in the text
+    """Returns 0.0–1.0 fear keyword density score."""
+    text_lower = text.lower()
     fear_count = sum(1 for word in FEAR_KEYWORDS if word in text_lower)
-
-    # Normalize: cap at 5 matches = maximum fear score of 1.0
-    # e.g. 0 matches → 0.0, 3 matches → 0.6, 5+ matches → 1.0
-    MAX_FEAR_KEYWORDS = 5
-    return round(min(fear_count / MAX_FEAR_KEYWORDS, 1.0), 2)
+    return round(min(fear_count / 5, 1.0), 2)
 
 
 # =============================================================
-# HELPER FUNCTION: Compute Clickbait Score
-#
-# Uses regex patterns to detect clickbait language in the title.
+# HELPER: Clickbait Score
 # =============================================================
+
 def compute_clickbait_score(title: str) -> float:
-    """
-    Returns a clickbait score between 0.0 (genuine) and 1.0 (very clickbait-y).
-
-    Uses regular expressions to detect common clickbait patterns.
-    """
+    """Returns 0.0–1.0 clickbait pattern score."""
     title_lower = title.lower()
-
-    # Count how many clickbait patterns match
-    matches = sum(
-        1 for pattern in CLICKBAIT_PATTERNS
-        if re.search(pattern, title_lower)
-    )
-
-    # Normalize: cap at 4 matches = maximum clickbait score of 1.0
-    MAX_CLICKBAIT = 4
-    return round(min(matches / MAX_CLICKBAIT, 1.0), 2)
+    matches = sum(1 for p in CLICKBAIT_PATTERNS if re.search(p, title_lower))
+    return round(min(matches / 4, 1.0), 2)
 
 
 # =============================================================
-# HELPER FUNCTION: Determine Emotional Intensity
-#
-# Combines the AI confidence score with the fear score.
-# High confidence + high fear = high emotional intensity.
+# HELPER: Finance Article Detection
 # =============================================================
+
+def is_finance_article(text: str) -> bool:
+    """Returns True if the text contains finance/business keywords."""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in FINANCE_KEYWORDS)
+
+
+# =============================================================
+# HELPER: Emotional Intensity
+# =============================================================
+
 def get_emotional_intensity(confidence: float, fear_score: float) -> str:
-    """
-    Returns 'Low', 'Moderate', or 'High' based on combined signals.
-
-    - confidence: how strongly the AI model felt about the sentiment (0–1)
-    - fear_score: how many fear keywords were found (0–1)
-    """
-    # Combined intensity = average of AI confidence and fear score
+    """Returns 'Low', 'Moderate', or 'High'."""
     combined = (confidence + fear_score) / 2
-
     if combined >= 0.70:
         return "High"
     elif combined >= 0.40:
         return "Moderate"
-    else:
-        return "Low"
+    return "Low"
 
 
 # =============================================================
-# HELPER FUNCTION: Determine Wellness Impact
-#
-# Produces a wellness_impact level and a friendly message.
+# HELPER: Wellness Impact
 # =============================================================
+
 def get_wellness_impact(
-    sentiment_label: str,
-    fear_score: float,
-    clickbait_score: float
+    sentiment_label:    str,
+    fear_score:         float,
+    clickbait_score:    float,
+    finance_overridden: bool = False,
 ) -> tuple[str, str]:
-    """
-    Returns (impact_level, message) for mental wellness.
+    """Returns (impact_level, message)."""
 
-    Considers:
-      - Is the sentiment negative?
-      - Is the fear score high?
-      - Is it clickbait-y (likely designed to provoke anxiety)?
-    """
+    if finance_overridden:
+        return (
+            "LOW",
+            "📊 This appears to be a financial or business news article. "
+            "Words like 'fall', 'drop', or 'decline' are standard financial "
+            "reporting language and do not indicate genuine negativity or harm. "
+            "Sentiment has been adjusted to Neutral for a more accurate reading.",
+        )
 
-    # A high-impact article = negative AND fear-inducing AND possibly clickbait
     is_negative  = sentiment_label == "NEGATIVE"
     is_fearful   = fear_score >= 0.5
     is_clickbait = clickbait_score >= 0.5
 
     if is_negative and is_fearful:
-        level   = "HIGH"
-        message = (
+        return (
+            "HIGH",
             "⚠️ This article contains strong negative and fear-inducing language. "
             "Consider verifying with multiple sources before forming strong opinions. "
-            "Limit exposure to highly stressful news for mental well-being."
+            "Limit exposure to highly stressful news for mental well-being.",
         )
     elif is_negative or is_fearful or is_clickbait:
-        level   = "MODERATE"
-        message = (
+        return (
+            "MODERATE",
             "🔔 This article has some negative or emotionally charged language. "
-            "Read critically and be mindful of how news consumption affects your mood."
+            "Read critically and be mindful of how news consumption affects your mood.",
         )
-    else:
-        level   = "LOW"
-        message = (
-            "✅ This article appears to have a neutral or positive tone. "
-            "It is likely safe to read without significant mental wellness concerns."
-        )
-
-    return level, message
+    return (
+        "LOW",
+        "✅ This article appears to have a neutral or positive tone. "
+        "It is likely safe to read without significant mental wellness concerns.",
+    )
 
 
 # =============================================================
-# HELPER FUNCTION: Generate an Overall Recommendation
+# HELPER: Recommendation
 # =============================================================
+
 def get_recommendation(
     sentiment_label: str,
     wellness_impact: str,
-    clickbait_score: float
+    clickbait_score: float,
 ) -> str:
-    """Returns a practical recommendation for the reader."""
-
+    """Returns a practical reading recommendation."""
     if wellness_impact == "HIGH":
         return (
             "Take a break from this type of content. Seek balanced, solution-focused news. "
@@ -290,147 +238,426 @@ def get_recommendation(
             "This article has a positive tone. Engaging with uplifting content "
             "can improve focus and reduce news fatigue."
         )
+    return (
+        "Stay informed but set healthy limits on news consumption. "
+        "Balance with positive content for mental wellness."
+    )
+
+
+# =============================================================
+# HELPER: Generate AI Summary
+# =============================================================
+
+def generate_summary(text: str) -> tuple[str, bool]:
+    """Returns (summary_text, used_ai_model)."""
+    word_count = len(text.split())
+
+    if SUMMARIZER_LOADED and summarizer_pipeline is not None and word_count >= 30:
+        try:
+            max_len = min(130, max(40, word_count // 3))
+            result  = summarizer_pipeline(
+                text, max_length=max_len, min_length=30,
+                do_sample=False, truncation=True,
+            )
+            return result[0]["summary_text"].strip(), True
+        except Exception as e:
+            logger.warning(f"Summarizer fallback: {e}")
+
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if len(s.split()) >= 5]
+    fallback  = " ".join(sentences[:2])
+    if not fallback:
+        fallback = text[:280] + ("..." if len(text) > 280 else "")
+    return fallback, False
+
+
+# =============================================================
+# HELPER: Extract Key Points
+# =============================================================
+
+def extract_key_points(text: str, max_points: int = 4) -> list[str]:
+    """Returns 3–5 key sentences using position + content heuristics."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if 5 <= len(s.split()) <= 50]
+
+    if not sentences:
+        return ["Not enough content to extract key points."]
+
+    total = len(sentences)
+
+    def score(idx: int, sent: str) -> float:
+        s = 0.0
+        if idx == 0:         s += 3.0
+        if idx == 1:         s += 1.0
+        if idx == total - 1: s += 1.5
+        if re.search(r"\d+", sent): s += 0.8
+        return s
+
+    ranked  = sorted(range(total), key=lambda i: -score(i, sentences[i]))
+    top_idx = sorted(ranked[:max_points])
+    return [sentences[i] for i in top_idx]
+
+
+# =============================================================
+# HELPER: Estimate Reading Time
+# =============================================================
+
+def estimate_reading_time(text: str) -> tuple[int, str]:
+    """Returns (seconds, label)."""
+    WORDS_PER_MINUTE = 238
+    word_count = len(text.split())
+    seconds    = max(10, int((word_count / WORDS_PER_MINUTE) * 60))
+
+    if seconds < 60:
+        label = f"about {seconds} seconds"
+    elif seconds < 120:
+        label = "about 1 minute"
     else:
+        label = f"about {round(seconds / 60)} minutes"
+
+    return seconds, label
+
+
+# =============================================================
+# HELPER: Emotional Label
+# =============================================================
+
+def get_emotional_label(
+    sentiment_label:    str,
+    fear_score:         float,
+    confidence:         float,
+    clickbait_score:    float,
+    finance_overridden: bool,
+) -> tuple[str, str]:
+    """Returns (emotional_label, emotional_description)."""
+
+    if finance_overridden:
         return (
-            "Stay informed but set healthy limits on news consumption. "
-            "Balance with positive content for mental wellness."
+            "📊 Informative & Factual",
+            "This is financial or business reporting. "
+            "Market-movement words like 'fall' or 'drop' are neutral in this context.",
         )
 
+    if sentiment_label == "POSITIVE":
+        if fear_score < 0.2 and confidence >= 0.75:
+            return (
+                "😊 Uplifting & Positive",
+                "The article has an encouraging, optimistic tone with no alarming signals.",
+            )
+        return (
+            "🙂 Mildly Positive",
+            "The article leans positive but may contain some cautionary elements.",
+        )
+
+    if sentiment_label == "NEGATIVE":
+        if fear_score >= 0.5 and clickbait_score >= 0.5:
+            return (
+                "😱 Alarming & Sensational",
+                "Strong negative framing combined with clickbait tactics. Verify before sharing.",
+            )
+        if fear_score >= 0.5:
+            return (
+                "😟 Concerning & Distressing",
+                "The article contains alarming language that may cause anxiety. Read mindfully.",
+            )
+        if clickbait_score >= 0.5:
+            return (
+                "🎭 Dramatic & Exaggerated",
+                "Clickbait tactics detected. The headline may be more dramatic than the content.",
+            )
+        return (
+            "😐 Negatively Framed",
+            "The article has a negative tone but without extreme fear or clickbait signals.",
+        )
+
+    if clickbait_score >= 0.5:
+        return (
+            "🤔 Neutral but Clickbait-y",
+            "Content is relatively balanced, but the headline uses sensationalist language.",
+        )
+    return (
+        "😐 Balanced & Neutral",
+        "The article presents information in a calm, factual, and balanced tone.",
+    )
+
 
 # =============================================================
-# POST /analyze
-#
-# The main endpoint. Accepts a news title + description,
-# runs them through the AI model and scoring functions,
-# and returns a complete analysis report.
-#
-# How to call it (from Swagger /docs or from the frontend):
-#   POST http://127.0.0.1:8000/analyze
-#   Content-Type: application/json
-#   Body: { "title": "...", "description": "..." }
+# NEW: Fake News Risk Indicator  (Phase 7)
 # =============================================================
+
+def compute_fake_news_risk(
+    title:          str,
+    combined_text:  str,
+    fear_score:     float,
+    clickbait_score: float,
+    sentiment_label: str,
+    confidence:     float,
+) -> tuple[str, str]:
+    """
+    Compute a Fake News Risk level: LOW | MEDIUM | HIGH.
+
+    Based on:
+      - Sensational / conspiracy language in title + text
+      - High fear AND high clickbait together
+      - Extreme confidence on a NEGATIVE sentiment (model very sure → suspicious)
+      - Excessive emotional manipulation patterns
+
+    Returns
+    -------
+    (risk_level, reason)
+        risk_level : "LOW" | "MEDIUM" | "HIGH"
+        reason     : short explanation for the user
+    """
+    text_lower  = (title + " " + combined_text).lower()
+
+    # Count sensational words
+    sensational_count = sum(
+        1 for word in SENSATIONAL_WORDS if word in text_lower
+    )
+
+    # Signal scoring
+    signals = 0
+    reasons = []
+
+    if clickbait_score >= 0.5:
+        signals += 1
+        reasons.append("clickbait headline")
+
+    if fear_score >= 0.6:
+        signals += 1
+        reasons.append("high fear language")
+
+    if sensational_count >= 2:
+        signals += 2
+        reasons.append(f"{sensational_count} sensational/conspiracy terms")
+    elif sensational_count == 1:
+        signals += 1
+        reasons.append("sensational language")
+
+    if sentiment_label == "NEGATIVE" and confidence >= 0.90 and fear_score >= 0.5:
+        signals += 1
+        reasons.append("extreme negative framing")
+
+    # All caps words in title (shouting = manipulation)
+    caps_words = len([w for w in title.split() if w.isupper() and len(w) > 2])
+    if caps_words >= 2:
+        signals += 1
+        reasons.append("all-caps words in headline")
+
+    # Assign risk level
+    if signals >= 4:
+        level = "HIGH"
+        prefix = "Multiple red flags detected: "
+    elif signals >= 2:
+        level = "MEDIUM"
+        prefix = "Some credibility concerns: "
+    else:
+        level = "LOW"
+        prefix = "No significant fake news indicators detected."
+
+    if reasons and signals >= 2:
+        reason = prefix + ", ".join(reasons) + "."
+    else:
+        reason = prefix
+
+    return level, reason
+
+
+# =============================================================
+# NEW: Emotional Framing Detector  (Phase 7)
+# =============================================================
+
+def get_emotional_framing(
+    sentiment_label:    str,
+    fear_score:         float,
+    clickbait_score:    float,
+    finance_overridden: bool,
+) -> str:
+    """
+    Classify the article's primary emotional framing style.
+
+    Returns one of:
+      - "Neutral"            — balanced, factual, minimal emotional language
+      - "Fear-driven"        — heavy use of fear/alarm language
+      - "Emotionally Charged"— strong sentiment (positive or negative)
+                               but not necessarily manipulative
+      - "Sensationalized"    — clickbait + high emotional content together
+    """
+    if finance_overridden:
+        return "Neutral"
+
+    is_high_fear      = fear_score >= 0.5
+    is_high_clickbait = clickbait_score >= 0.5
+    is_strong_sent    = sentiment_label in ("POSITIVE", "NEGATIVE")
+
+    if is_high_clickbait and (is_high_fear or is_strong_sent):
+        return "Sensationalized"
+
+    if is_high_fear:
+        return "Fear-driven"
+
+    if is_strong_sent:
+        return "Emotionally Charged"
+
+    return "Neutral"
+
+
+# =============================================================
+# POST /analyze — Main Endpoint
+# =============================================================
+
 @router.post("/", response_model=AnalyzeResponse)
-def analyze_news(request: AnalyzeRequest):
+def analyze_news(request: AnalyzeRequest, db: Session = Depends(get_db)):
     """
     ## AI News Analysis
 
-    Analyzes a news article's title and description using:
-    - **HuggingFace DistilBERT** for sentiment classification
-    - **Custom keyword analysis** for fear and clickbait scoring
-    - **Wellness impact assessment** for mental health awareness
-
-    **Input:** `{ "title": "...", "description": "..." }`
-
-    **Output:** Sentiment, confidence, fear score, clickbait score, wellness impact.
+    Analyzes a news article using:
+    - **HuggingFace DistilBERT** — sentiment classification
+    - **Custom keyword analysis** — fear and clickbait scoring
+    - **Wellness impact assessment** — mental health awareness
+    - **Fake News Risk Indicator** — NEW: LOW / MEDIUM / HIGH
+    - **Emotional Framing Detector** — NEW: Neutral / Fear-driven / Sensationalized
     """
 
-    # -----------------------------------------------
-    # Step 1: Check that the AI model is available
-    # -----------------------------------------------
+    # Step 1: Guard — model available?
     if not MODEL_LOADED or sentiment_pipeline is None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI model is not available. This usually means the transformers "
-                "library or model failed to load. Check server logs."
+                "AI model is not available. The transformers library or model "
+                "failed to load. Check server logs."
             ),
         )
 
-    # -----------------------------------------------
-    # Step 2: Combine title + description into one text
-    #
-    # We concatenate them with a separator so the model
-    # considers both the headline AND the content together.
-    # -----------------------------------------------
+    # Step 2: Combine text
     combined_text = f"{request.title}. {request.description}"
 
-    # -----------------------------------------------
-    # Step 3: Run AI Sentiment Analysis
-    #
-    # sentiment_pipeline(text) does internally:
-    #   1. Tokenize: "Scientists discover..." → [101, 3522, 8569, ...]
-    #   2. Forward pass: numbers → model → logits (raw scores)
-    #   3. Softmax: logits → probabilities → [0.08, 0.92]
-    #   4. Argmax: pick the highest probability label
-    #   → Returns: [{"label": "POSITIVE", "score": 0.9234}]
-    # -----------------------------------------------
+    # Step 3: Run AI sentiment
     try:
-        # The pipeline returns a list; we take the first (and only) result
         raw_result  = sentiment_pipeline(combined_text)[0]
-        # raw_result looks like: {"label": "POSITIVE", "score": 0.9234}
-
-        ai_label    = raw_result["label"]   # "POSITIVE" or "NEGATIVE"
-        ai_score    = raw_result["score"]   # Float between 0.0 and 1.0
-
+        ai_label    = raw_result["label"]
+        ai_score    = raw_result["score"]
     except Exception as e:
         logger.error(f"Sentiment inference error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"AI model inference failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"AI model inference failed: {e}")
 
-    # -----------------------------------------------
-    # Step 4: Map the model's binary output to 3-level sentiment
-    #
-    # DistilBERT only returns POSITIVE or NEGATIVE.
-    # We treat low-confidence results as NEUTRAL.
-    # -----------------------------------------------
-    NEUTRAL_THRESHOLD = 0.65  # Below this confidence = treat as NEUTRAL
+    # Step 4: Map to 3-level sentiment
+    NEUTRAL_THRESHOLD = 0.65
+    sentiment_label   = ai_label if ai_score >= NEUTRAL_THRESHOLD else "NEUTRAL"
 
-    if ai_score < NEUTRAL_THRESHOLD:
-        sentiment_label = "NEUTRAL"
-    else:
-        sentiment_label = ai_label  # "POSITIVE" or "NEGATIVE"
-
-    # -----------------------------------------------
-    # Step 5: Run our custom scoring functions
-    # -----------------------------------------------
+    # Step 5: Custom scoring
     fear_score      = compute_fear_score(combined_text)
-    clickbait_score = compute_clickbait_score(request.title)  # Clickbait is in titles
+    clickbait_score = compute_clickbait_score(request.title)
 
-    # -----------------------------------------------
-    # Step 6: Derive higher-level analysis
-    # -----------------------------------------------
+    # Step 5b: Finance override
+    finance_overridden = False
+    FINANCE_CONF_THRESHOLD = 0.65
+    FINANCE_FEAR_THRESHOLD = 0.3
+
+    if (
+        sentiment_label == "NEGATIVE"
+        and ai_score >= FINANCE_CONF_THRESHOLD
+        and fear_score < FINANCE_FEAR_THRESHOLD
+        and is_finance_article(combined_text)
+    ):
+        sentiment_label    = "NEUTRAL"
+        finance_overridden = True
+        logger.info(f"📊 Finance override: NEGATIVE→NEUTRAL (conf={ai_score:.2f}, fear={fear_score})")
+
+    # Step 6: Higher-level analysis
     emotional_intensity = get_emotional_intensity(ai_score, fear_score)
     wellness_impact, wellness_message = get_wellness_impact(
-        sentiment_label, fear_score, clickbait_score
+        sentiment_label, fear_score, clickbait_score,
+        finance_overridden=finance_overridden,
     )
     recommendation = get_recommendation(sentiment_label, wellness_impact, clickbait_score)
 
-    # -----------------------------------------------
-    # Step 7: Build and return the structured response
-    #
-    # FastAPI validates this against AnalyzeResponse schema
-    # and automatically serializes it to JSON.
-    # -----------------------------------------------
-    return AnalyzeResponse(
-        # Echo back what was analyzed
-        title=request.title,
-        description_preview=request.description[:120] + "..." if len(request.description) > 120 else request.description,
+    # Step 6b: Article intelligence
+    quick_summary, summarizer_used              = generate_summary(combined_text)
+    key_points                                  = extract_key_points(combined_text)
+    reading_time_seconds, reading_time_label    = estimate_reading_time(combined_text)
+    emotional_label, emotional_description      = get_emotional_label(
+        sentiment_label, fear_score, ai_score, clickbait_score, finance_overridden
+    )
 
-        # AI sentiment result
-        sentiment={
+    # Step 6c: NEW — Fake News Risk + Emotional Framing
+    fake_news_risk, fake_news_reason = compute_fake_news_risk(
+        title           = request.title,
+        combined_text   = combined_text,
+        fear_score      = fear_score,
+        clickbait_score = clickbait_score,
+        sentiment_label = sentiment_label,
+        confidence      = ai_score,
+    )
+    emotional_framing = get_emotional_framing(
+        sentiment_label, fear_score, clickbait_score, finance_overridden
+    )
+
+    # Step 6d: Save to SQLite
+    try:
+        crud.create_analysis_record(
+            db,
+            keyword             = request.keyword,
+            title               = request.title,
+            source              = request.source,
+            sentiment           = sentiment_label,
+            confidence          = ai_score,
+            fear_score          = fear_score,
+            clickbait_score     = clickbait_score,
+            wellness_impact     = wellness_impact,
+            emotional_label     = emotional_label,
+            quick_summary       = quick_summary,
+            reading_time_label  = reading_time_label,
+        )
+        logger.info(f"💾 Saved to DB: '{request.title[:40]}'")
+    except Exception as db_err:
+        logger.error(f"❌ DB save failed (non-blocking): {db_err}")
+
+    # Step 7: Build and return response
+    return AnalyzeResponse(
+        title               = request.title,
+        description_preview = (
+            request.description[:120] + "..."
+            if len(request.description) > 120
+            else request.description
+        ),
+
+        sentiment = {
             "label":              sentiment_label,
             "confidence":         round(ai_score, 4),
             "confidence_percent": f"{ai_score * 100:.1f}%",
         },
 
-        # Custom scoring
-        wellness_scores={
+        wellness_scores = {
             "fear_score":      fear_score,
             "clickbait_score": clickbait_score,
             "wellness_impact": wellness_impact,
             "wellness_message": wellness_message,
         },
 
-        # High-level summary
-        summary={
-            "overall_tone":       sentiment_label.capitalize(),
+        summary = {
+            "overall_tone":        sentiment_label.capitalize(),
             "emotional_intensity": emotional_intensity,
-            "recommendation":     recommendation,
+            "recommendation":      recommendation,
         },
 
-        # Metadata
-        model_used=MODEL_NAME,
-        analysis_version="2.0",
+        article_insights = {
+            "quick_summary":         quick_summary,
+            "key_points":            key_points,
+            "reading_time_seconds":  reading_time_seconds,
+            "reading_time_label":    reading_time_label,
+            "emotional_label":       emotional_label,
+            "emotional_description": emotional_description,
+            "summarizer_used":       summarizer_used,
+        },
+
+        # NEW in v2
+        ai_flags = {
+            "fake_news_risk":        fake_news_risk,
+            "emotional_framing":     emotional_framing,
+            "fake_news_risk_reason": fake_news_reason,
+        },
+
+        model_used       = MODEL_NAME,
+        analysis_version = "4.0",
     )

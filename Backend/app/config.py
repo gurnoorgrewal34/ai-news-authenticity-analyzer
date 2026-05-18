@@ -30,13 +30,16 @@ load_dotenv()
 # Used in main.py to label the FastAPI application
 # =============================================================
 APP_TITLE       = "AI News Authenticity & Mental Wellness Analyzer"
-APP_VERSION     = "1.0.0"
+APP_VERSION     = "2.0.0"
 APP_DESCRIPTION = (
     "A professional-grade backend API that fetches live news, "
     "analyzes sentiment using HuggingFace AI, and assesses mental wellness impact.\n\n"
     "**Module 1** — `GET /news` — Fetch live headlines by keyword via NewsAPI.\n\n"
     "**Module 2** — `POST /analyze` — AI sentiment analysis, fear scoring, "
-    "clickbait detection, and mental wellness impact assessment."
+    "clickbait detection, and mental wellness impact assessment.\n\n"
+    "**Module 3** — `GET /history` — SQLite analysis history.\n\n"
+    "**Module 4** — `GET /context` — Factual historical context via Wikipedia + NewsAPI "
+    "(zero hallucinations)."
 )
 
 
@@ -65,3 +68,21 @@ NEWSAPI_KEY       = os.getenv("NEWSAPI_KEY", "")         # Your secret API key f
 NEWSAPI_BASE_URL  = "https://newsapi.org/v2/everything"  # NewsAPI search endpoint
 NEWSAPI_LANGUAGE  = "en"                                  # Return English articles only
 NEWSAPI_PAGE_SIZE = 10                                    # Default: return 10 articles
+
+
+# =============================================================
+# Module 4 — Historical Context Configuration
+#
+# NEWSAPI_SORT_RELEVANCY:
+#   Used by context_service.py when fetching related article sources.
+#   "relevancy" returns thematically related articles rather than
+#   the newest articles (which is what /news uses with "publishedAt").
+#
+# WIKIPEDIA_API_BASE:
+#   The free Wikipedia REST API endpoint for page summaries.
+#   No API key required. Returns JSON with extract, description,
+#   canonical URL, and page metadata.
+#   Docs: https://en.wikipedia.org/api/rest_v1/
+# =============================================================
+NEWSAPI_SORT_RELEVANCY = "relevancy"                              # Sort context sources by relevance
+WIKIPEDIA_API_BASE     = "https://en.wikipedia.org/api/rest_v1"  # Wikipedia REST API base URL

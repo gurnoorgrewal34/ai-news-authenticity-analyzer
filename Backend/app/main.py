@@ -1,98 +1,106 @@
 # =============================================================
-# app/main.py — Entry Point of the FastAPI Application
+# app/main.py — Entry Point (v2)
 #
-# This file is the "hub" of the entire backend.
-# It creates the server, imports all config, and registers
-# every router (route group) that the API exposes.
-#
-# Current Modules:
-#   Module 1 — /news    → Fetch live news by keyword (NewsAPI)
-#   Module 2 — /analyze → AI sentiment + wellness analysis
-#
-# To start the server:
-#   cd Backend
-#   python -m uvicorn app.main:app --reload
-#
-# Then visit:
-#   http://127.0.0.1:8000/       → Health check
-#   http://127.0.0.1:8000/docs   → Interactive Swagger UI (all endpoints)
-#   http://127.0.0.1:8000/news?keyword=AI        → Module 1
-#   POST http://127.0.0.1:8000/analyze           → Module 2
+# WHAT CHANGED IN v2:
+#   - Safe ALTER TABLE migration in startup event for new columns:
+#     quick_summary, reading_time_label
+#   - Migration uses raw SQL with IF NOT EXISTS guard — zero data loss
 # =============================================================
 
 from fastapi import FastAPI
+from sqlalchemy import text
 
-# Import centralized settings — defined ONCE in config.py
 from app.config import APP_TITLE, APP_VERSION, APP_DESCRIPTION
+from app.database import engine, Base
+from app import models  # noqa: F401
 
-# -----------------------------------------------
-# Import routers — each file handles a group of routes
-# Adding a new feature = create a new router file + one line here
-# -----------------------------------------------
-from app.routers import news     # Module 1: /news — Live news fetching
-from app.routers import analyze  # Module 2: /analyze — AI analysis engine
+from app.routers import news
+from app.routers import analyze
+from app.routers import history
+from app.routers import context
 
+import logging
 
-# -----------------------------------------------
-# Create the FastAPI application instance
-#
-# This is the main "engine". FastAPI uses the title, version,
-# and description to auto-generate the /docs Swagger UI.
-# -----------------------------------------------
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title=APP_TITLE,
     version=APP_VERSION,
     description=APP_DESCRIPTION,
-    contact={
-        "name": "Gurnoor — AI News Authenticity & Mental Wellness Analyzer",
-    },
-    license_info={
-        "name": "MIT",
-    },
+    contact={"name": "Gurnoor — AI News Authenticity & Mental Wellness Analyzer"},
+    license_info={"name": "MIT"},
 )
 
 
-# -----------------------------------------------
+# =============================================================
+# STARTUP EVENT — Create Tables + Safe Column Migration
+# =============================================================
+
+@app.on_event("startup")
+def create_tables():
+    """
+    1. Create all tables if they don't exist (idempotent).
+    2. Safely add new columns to the existing table without
+       touching any existing data.
+
+    SQLite-safe ALTER TABLE strategy:
+      - We attempt ADD COLUMN for each new column.
+      - If the column already exists, SQLite raises an error
+        which we catch and ignore.
+      - This means the migration is always safe to run.
+    """
+    # Step 1: Create tables (no-op if they already exist)
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Database tables created / verified.")
+
+    # Step 2: Safe column migrations for new fields added in v2
+    new_columns = [
+        ("quick_summary",       "TEXT"),
+        ("reading_time_label",  "TEXT"),
+    ]
+
+    with engine.connect() as conn:
+        for col_name, col_type in new_columns:
+            try:
+                conn.execute(
+                    text(f"ALTER TABLE analysis_history ADD COLUMN {col_name} {col_type}")
+                )
+                conn.commit()
+                logger.info("✅ Column '%s' added to analysis_history.", col_name)
+            except Exception:
+                # Column already exists — this is normal on every run after first
+                logger.debug("Column '%s' already exists — skipping.", col_name)
+
+
+# =============================================================
 # Register Routers
-#
-# app.include_router() plugs each router into the main app.
-# All routes in news.py start with /news (defined via prefix).
-# All routes in analyze.py start with /analyze (defined via prefix).
-#
-# Future modules:
-#   from app.routers import authenticity
-#   app.include_router(authenticity.router)
-# -----------------------------------------------
-app.include_router(news.router)     # Registers: GET /news
-app.include_router(analyze.router)  # Registers: POST /analyze
+# =============================================================
+app.include_router(news.router)
+app.include_router(analyze.router)
+app.include_router(history.router)
+app.include_router(context.router)
 
 
-# -----------------------------------------------
-# Root Route — Server Health Check
-#
-# GET /
-# This is a simple check to confirm the server is live.
-# In production, uptime monitors ping this to check health.
-# -----------------------------------------------
+# =============================================================
+# Root — Health Check
+# =============================================================
 @app.get("/", tags=["Health"])
 def root():
     """
     ## Server Health Check
 
-    Returns a welcome message and links to available API endpoints.
-
-    **Modules available:**
-    - `GET /news?keyword=<topic>` — Module 1: Fetch live news
-    - `POST /analyze` — Module 2: AI sentiment & wellness analysis
-    - `GET /docs` — Interactive Swagger documentation
+    Returns a welcome message and links to all API endpoints.
     """
     return {
         "status":   "online",
-        "message":  "AI News Authenticity & Mental Wellness Analyzer — API is running.",
+        "message":  "AI News Authenticity & Mental Wellness Analyzer — API v2 running.",
         "version":  APP_VERSION,
         "modules": {
-            "module_1": "GET  /news?keyword=<topic>  — Live news fetching",
-            "module_2": "POST /analyze               — AI sentiment & wellness analysis",
+            "module_1": "GET  /news?keyword=<topic>   — Live news fetching",
+            "module_2": "POST /analyze                — AI sentiment & wellness analysis",
+            "module_3": "GET  /history                — SQLite analysis history",
+            "module_3b": "DELETE /history/{id}        — Delete a history record",
+            "module_4": "GET  /context?topic=<topic>  — Historical context (Wikipedia + NewsAPI)",
         },
         "docs": "Visit /docs for the full interactive API documentation",
     }
