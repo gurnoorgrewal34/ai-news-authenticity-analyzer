@@ -135,36 +135,4 @@ Once the server is running, open your browser:
 
 ---
 
-## 📌 Coming Next (Future Modules)
-
-- **Module 2:** AI Authenticity Scorer (real vs. fake news)
-- **Module 3:** Mental Wellness Analyzer (sentiment & stress detection)
-- **Module 4:** Database integration
-- **Module 5:** Frontend dashboard
-
-
-
-What Was Added (v3.0)
-Backend — app/schemas/analyze.py
-Added a new ArticleInsights Pydantic schema with 7 fields, and wired it into AnalyzeResponse.
-
-Backend — app/routers/analyze.py
-Addition	What it does
-DistilBART pipeline	Loads sshleifer/distilbart-cnn-12-6 (~300MB) at startup in its own try/except — if it fails, sentiment still works
-generate_summary()	Calls DistilBART to produce a 2–3 sentence summary; falls back to first 2 sentences if model unavailable
-extract_key_points()	Pure Python — scores sentences by position (lead = highest weight) + presence of numbers (concrete facts), returns top 4 in reading order
-estimate_reading_time()	words / 238 × 60 → returns seconds + human label like "about 1 minute"
-get_emotional_label()	Maps (sentiment, fear, confidence, clickbait, finance_override) → friendly labels like "😊 Uplifting & Positive" or "😱 Alarming & Sensational"
-Frontend — Frontend/app.py
-The results panel now shows 6 sections in this order:
-
-🎭 Emotional Tone        ← human-friendly label (new hero element)
-📝 Quick Summary         ← DistilBART output with source note
-🔑 Key Points            ← extracted bullet list  
-😨 Fear · 🎣 Clickbait  ← score bars
-🧘 Wellness Impact       ← existing
-💡 Wellness Insight      ← existing recommendation
-The Reading Time badge appears in the panel header row (top right). The raw POSITIVE/NEGATIVE/NEUTRAL badge is still visible as a small secondary pill under the emotional tone label.
-
-Note: On first backend restart, DistilBART (~300MB) will download and cache. This is a one-time delay. After that, startup is fast.
 
